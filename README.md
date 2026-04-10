@@ -1,16 +1,16 @@
 <h1>Cyber.Ai</h1>
 
-This is a **Cybersecurity Platform Featuring an AI-Driven Assessment Bot** which will go through a company's infrastructure, probing for vulnerabitlites and gaps. 
-Once identified, it would ask dynamic questions to gain further clarifications. The topics include Network Security, Compliance, Data Protection and more. 
+This is a **Cybersecurity Platform Featuring an AI-Driven Assessment Bot** which will go through a company's infrastructure, probing for vulnerabitlites and gaps.
+Once identified, it would ask dynamic questions to gain further clarifications. The topics include Network Security, Compliance, Data Protection and more.
 Based on the answers by the company, it would rate every answer and give recommendations to improve if required. At the end of the assessment, an overall assessment report would be generated
-highlighting the weak points as well as suggest actionable insights. 
+highlighting the weak points as well as suggest actionable insights.
 
-We needed to heavily rely on understanding the **context** of what was present in the documentats as these documents would rarely have the exact terminologies for the protocols followed. 
+We needed to heavily rely on understanding the **context** of what was present in the documentats as these documents would rarely have the exact terminologies for the protocols followed.
 
 <h4>Key Features</h4>
 
 1. 🧑🏻‍💻 Dynamic and Context-Aware Questioning using a LLM and Chain of Thought Prompt Engineering.
-2. 🤔 Contextual Learning with Knowledge Graphs to improve the accuracy of dynamic questioning. 
+2. 🤔 Contextual Learning with Knowledge Graphs to improve the accuracy of dynamic questioning.
 3. 📝 Assessment of Infrastructure Documentation to find vulnerabilties to give recommendations.
 4. 💯 Real-Time Risk Scoring categorizing risks into different categories based on the knowledge base.
 5. ✅ Detailed Report and Recommendations highlighting major risks and conclusions derived from the question-answering.
@@ -43,5 +43,3 @@ We needed to heavily rely on understanding the **context** of what was present i
 
 <h4>Future Improvements</h4>
 We think that a right exit strategy is equally important as to determine when to stop asking the questions and generate the report based on how 'complete' the information gathered is. For this we will be exploring knowledge graphs along with google's page ranking approach to determine the completness of the knowledge graph of the uploaded documentation.
-
-

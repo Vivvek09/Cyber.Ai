@@ -30,7 +30,7 @@ const BizBot = ({ onComplete, onVulnerabilityReportGenerated }) => {
     setIsLoading(true)
     try {
       const response = await axios.get('http://localhost:8000/questions')
-      setQuestions(response.data.questions)
+      setQuestions(Array.isArray(response.data.questions) ? response.data.questions : [])
       setConversation([
         { type: 'bot', content: 'Welcome to Cyber Bot! What is your name?' },
       ])
@@ -69,19 +69,33 @@ const BizBot = ({ onComplete, onVulnerabilityReportGenerated }) => {
       setConversation(prev => [...prev, { type: 'bot', content: "I've initiated the download of the vulnerability report. Is there anything else you'd like to know about the vulnerabilities?" }])
     }
     if (!userName) {
+      const firstQuestion = questions[0]?.question
       setUserName(answer)
       setConversation(prev => [
         ...prev,
         { type: 'user', content: answer },
-        { type: 'bot', content: `Nice to meet you, ${answer}! Let's start our assessment. ${questions[0].question}` }
+        {
+          type: 'bot',
+          content: firstQuestion
+            ? `Nice to meet you, ${answer}! Let's start our assessment. ${firstQuestion}`
+            : `Nice to meet you, ${answer}! I am still loading assessment questions. Please wait a moment and try again.`
+        }
       ])
     } else {
+      const currentQuestion = questions[currentQuestionIndex]?.question
       setConversation(prev => [...prev, { type: 'user', content: answer }])
+
+      if (!currentQuestion) {
+        setConversation(prev => [...prev, { type: 'bot', content: 'I am still loading assessment questions. Please wait a moment and try again.' }])
+        setAnswer('')
+        return
+      }
+
       setIsLoading(true)
 
       try {
         const response = await axios.post('http://localhost:8000/answer', {
-          question: questions[currentQuestionIndex].question,
+          question: currentQuestion,
           answer: answer
         })
 

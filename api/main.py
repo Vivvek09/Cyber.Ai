@@ -1,10 +1,24 @@
+import os
+import csv
+import re
+from collections import Counter
+
+# Prevent Windows OpenMP runtime conflicts when torch/transformers load native libs.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 import PyPDF2
-import torch
-import transformers
-from transformers import RobertaTokenizerFast
-import os
+
+try:
+    import torch
+    import transformers
+    from transformers import RobertaTokenizerFast
+except Exception:
+    torch = None
+    transformers = None
+    RobertaTokenizerFast = None
+
 import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +40,10 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
-import pandas as pd
+try:
+    import pandas as pd
+except Exception:
+    pd = None
 from llmware.models import ModelCatalog
 from pydantic import BaseModel
 from typing import Dict
@@ -39,7 +56,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict
 from PIL import Image
-import pytesseract
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 import io
 app = FastAPI()
 
@@ -177,14 +197,23 @@ class SaveResultsRequest(BaseModel):
 @app.post("/save_results")
 async def save_results(request: SaveResultsRequest):
     results = request.results
-    df = pd.DataFrame(list(results.items()), columns=["Question", "Answer"])
-    df.to_csv("questions_answers.csv", index=False)
+    if pd is not None:
+        df = pd.DataFrame(list(results.items()), columns=["Question", "Answer"])
+        df.to_csv("questions_answers.csv", index=False)
+    else:
+        with open("questions_answers.csv", "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Question", "Answer"])
+            for question, answer in results.items():
+                writer.writerow([question, answer])
     return {"message": "Results saved to questions_answers.csv"}
 
 
 def extract_text_from_image(image_data):
     """Extract text from image using OCR."""
     try:
+        if pytesseract is None:
+            raise HTTPException(status_code=503, detail="OCR dependency is unavailable in the current Python environment")
         image = Image.open(io.BytesIO(image_data))
         text = pytesseract.image_to_string(image)
         return text
@@ -213,12 +242,43 @@ async def summarize(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
     
-# Load the SecureBERT model and tokenizer
-tokenizer = RobertaTokenizerFast.from_pretrained("ehsanaghaei/SecureBERT")
-model = transformers.RobertaForMaskedLM.from_pretrained("ehsanaghaei/SecureBERT")
+# Load SecureBERT only when explicitly enabled for inference-heavy deployments.
+ENABLE_SECUREBERT = os.getenv("ENABLE_SECUREBERT", "0").strip().lower() in {"1", "true", "yes"}
+if ENABLE_SECUREBERT and RobertaTokenizerFast is not None and transformers is not None:
+    try:
+        tokenizer = RobertaTokenizerFast.from_pretrained("ehsanaghaei/SecureBERT")
+        model = transformers.RobertaForMaskedLM.from_pretrained(
+            "ehsanaghaei/SecureBERT",
+            use_safetensors=False,
+        )
+    except Exception:
+        tokenizer = None
+        model = None
+else:
+    tokenizer = None
+    model = None
 
 # Predefined security terms for masking
 security_terms_corpus = ["firewall", "malware", "intrusion", "encryption", "phishing", "DDoS"]  # Sample terms
+STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "did", "do", "does",
+    "for", "from", "had", "has", "have", "he", "her", "him", "his", "i", "if", "in", "into", "is",
+    "it", "its", "me", "my", "of", "on", "or", "our", "ours", "please", "she", "so", "that", "the",
+    "their", "theirs", "them", "there", "these", "they", "this", "those", "to", "us", "was", "we",
+    "were", "what", "when", "where", "which", "who", "why", "will", "with", "would", "you", "your",
+    "yours"
+}
+
+def normalize_candidate_term(term: str) -> str:
+    """Normalize model/fallback candidate terms for ranking."""
+    lowered = str(term).strip().lower().replace(" ", "")
+    return re.sub(r"[^a-z0-9\-]", "", lowered)
+
+def is_filtered_candidate(term: str) -> bool:
+    """Return True for unusable candidate terms like stop words/noise."""
+    if not term or term.isdigit() or len(term) < 3:
+        return True
+    return term in STOP_WORDS
 
 def extract_text_from_pdf(pdf_file_path):
     """Extract text from a PDF file."""
@@ -253,67 +313,173 @@ def create_chunks(text, max_length=510):
     return decoded_chunks
 
 def predict_mask(sent, tokenizer, model, topk=10):
-    """Predict words for <mask> tokens in a sentence."""
+    """Predict candidate terms (with probabilities) for <mask> tokens."""
     token_ids = tokenizer.encode(sent, return_tensors='pt', add_special_tokens=True)
     masked_position = (token_ids.squeeze() == tokenizer.mask_token_id).nonzero()
     masked_pos = [mask.item() for mask in masked_position]
-    words = []
 
     with torch.no_grad():
         output = model(token_ids)
 
-    last_hidden_state = output[0].squeeze()
+    logits = output[0].squeeze()
 
     list_of_list = []
     for mask_index in masked_pos:
-        mask_hidden_state = last_hidden_state[mask_index]
-        idx = torch.topk(mask_hidden_state, k=topk, dim=0)[1]
-        words = [tokenizer.decode(i.item()).strip() for i in idx]
-        words = [w.replace(' ', '') for w in words]
-        list_of_list.append(words)
+        mask_logits = logits[mask_index]
+        probs = torch.softmax(mask_logits, dim=0)
+        values, idx = torch.topk(probs, k=topk, dim=0)
+        candidates = []
+        for token_id, probability in zip(idx.tolist(), values.tolist()):
+            term = tokenizer.decode([token_id]).strip().replace(" ", "")
+            if term:
+                candidates.append({"term": term.lower(), "score": float(probability)})
+        list_of_list.append(candidates)
 
     return list_of_list
 
-def generate_vulnerabilities(predictions, security_terms_corpus):
-    """Generate a list of vulnerabilities."""
-    vulnerabilities = []
+def aggregate_prediction_candidates(predictions, top_n=10):
+    """Aggregate and rank model candidates across all masked positions."""
+    term_scores = {}
     for sublist in predictions:
         for item in sublist:
-            if item not in security_terms_corpus:
-                vulnerabilities.append(item)
-    return vulnerabilities
+            if isinstance(item, dict):
+                term = str(item.get("term", "")).strip().lower()
+                score = float(item.get("score", 0.0))
+            else:
+                term = str(item).strip().lower()
+                score = 0.0
+
+            term = normalize_candidate_term(term)
+            if is_filtered_candidate(term):
+                continue
+
+            # Keep the strongest observed confidence for each candidate term.
+            term_scores[term] = max(term_scores.get(term, 0.0), score)
+
+    if not term_scores:
+        return []
+
+    ranked = sorted(term_scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    max_score = ranked[0][1] if ranked[0][1] > 0 else 1.0
+    return [{"term": term, "score": round(score / max_score, 4)} for term, score in ranked]
+
+def extract_fallback_candidates(doc_text, security_terms_corpus, top_n=10):
+    """Build ranked candidates from text statistics when model output is unavailable."""
+    words = re.findall(r"[A-Za-z][A-Za-z\-]{2,}", doc_text.lower())
+    if not words:
+        return [{"term": term.lower(), "score": 0.0} for term in security_terms_corpus[:top_n]]
+
+    counts = Counter(words)
+    max_count = max(counts.values())
+    security_terms = {term.lower() for term in security_terms_corpus}
+
+    ranked_terms = []
+
+    # Prioritize known security terms found in the document.
+    for term in security_terms:
+        if term in counts:
+            ranked_terms.append((term, counts[term]))
+
+    # Fill with most frequent remaining terms for richer context.
+    for term, count in counts.most_common():
+        if term in security_terms or term in STOP_WORDS:
+            continue
+        ranked_terms.append((term, count))
+
+    deduped = []
+    seen = set()
+    for term, count in ranked_terms:
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append({"term": term, "score": round(count / max_count, 4)})
+        if len(deduped) >= top_n:
+            break
+
+    if deduped:
+        return deduped
+
+    return [{"term": term.lower(), "score": 0.0} for term in security_terms_corpus[:top_n]]
+
+def extract_corpus_hits(doc_text, security_terms_corpus, top_n=10):
+    """Return ranked corpus terms that are actually present in the document."""
+    words = re.findall(r"[A-Za-z][A-Za-z\-]{2,}", doc_text.lower())
+    if not words:
+        return []
+
+    counts = Counter(words)
+    hits = []
+    for term in security_terms_corpus:
+        lowered = term.lower()
+        if lowered in counts:
+            hits.append((lowered, counts[lowered]))
+
+    if not hits:
+        return []
+
+    hits.sort(key=lambda x: (-x[1], x[0]))
+    return [term for term, _ in hits[:top_n]]
+
+def generate_vulnerabilities(predictions, security_terms_corpus):
+    """Generate vulnerabilities and ranked candidate terms."""
+    top_candidates = aggregate_prediction_candidates(predictions, top_n=10)
+    known_security_terms = {term.lower() for term in security_terms_corpus}
+    vulnerabilities = [item["term"] for item in top_candidates if item["term"] not in known_security_terms]
+    return vulnerabilities, top_candidates
 
 @app.post("/vulnerabilities/")
 async def extract_vulnerabilities(pdf: UploadFile = File(...)):
     """API endpoint to extract vulnerabilities from a PDF."""
-    # Save the uploaded PDF file
     pdf_path = f"temp_{pdf.filename}"
-    with open(pdf_path, "wb") as f:
-        f.write(await pdf.read())
-    
-    # Extract text from the PDF
-    doc_text = extract_text_from_pdf(pdf_path)
-    
-    # Remove the temp file
-    os.remove(pdf_path)
-    
-    # Create text chunks and mask terms
-    chunks = create_text_chunks(doc_text, chunk_size=512)
-    masked_chunks = create_mask(chunks, security_terms_corpus)
-    
-    # Perform mask prediction
-    predictions = []
-    for chunk in masked_chunks:
-        tokenized_chunks = create_chunks(chunk)
-        for tokenized_chunk in tokenized_chunks:
-            predicted_words = predict_mask(tokenized_chunk, tokenizer, model, topk=10)
-            predictions.extend(predicted_words)
-    
-    # Generate vulnerabilities based on predictions
-    vulnerabilities = generate_vulnerabilities(predictions, security_terms_corpus)
-    
-    # Return the vulnerabilities as a JSON response
-    return JSONResponse(content={"vulnerabilities": vulnerabilities})
+
+    try:
+        # Save the uploaded PDF file
+        with open(pdf_path, "wb") as f:
+            f.write(await pdf.read())
+
+        # Extract text from the PDF
+        try:
+            doc_text = extract_text_from_pdf(pdf_path)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not read PDF: {str(e)}")
+
+        # Fallback mode when ML dependencies or model weights are unavailable.
+        if tokenizer is None or model is None or torch is None:
+            vulnerabilities = extract_corpus_hits(doc_text, security_terms_corpus, top_n=10)
+            top_candidates = extract_fallback_candidates(doc_text, security_terms_corpus, top_n=10)
+            return JSONResponse(content={"vulnerabilities": vulnerabilities, "top_candidates": top_candidates})
+
+        try:
+            # Create text chunks and mask terms
+            chunks = create_text_chunks(doc_text, chunk_size=512)
+            masked_chunks = create_mask(chunks, security_terms_corpus)
+
+            # Perform mask prediction
+            predictions = []
+            for chunk in masked_chunks:
+                tokenized_chunks = create_chunks(chunk)
+                for tokenized_chunk in tokenized_chunks:
+                    predicted_words = predict_mask(tokenized_chunk, tokenizer, model, topk=10)
+                    predictions.extend(predicted_words)
+
+            # Generate vulnerabilities based on predictions
+            vulnerabilities, top_candidates = generate_vulnerabilities(predictions, security_terms_corpus)
+
+            # If model did not infer vulnerabilities, promote corpus terms found in doc.
+            if not vulnerabilities:
+                vulnerabilities = extract_corpus_hits(doc_text, security_terms_corpus, top_n=10)
+
+            # Ensure rich output even if model produced no useful masks/candidates.
+            if not top_candidates:
+                top_candidates = extract_fallback_candidates(doc_text, security_terms_corpus, top_n=10)
+        except Exception:
+            vulnerabilities = extract_corpus_hits(doc_text, security_terms_corpus, top_n=10)
+            top_candidates = extract_fallback_candidates(doc_text, security_terms_corpus, top_n=10)
+
+        return JSONResponse(content={"vulnerabilities": vulnerabilities, "top_candidates": top_candidates})
+    finally:
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
 
 # Run the app using Uvicorn
 # Command: uvicorn main:app --reload

@@ -4,6 +4,8 @@ import axios from 'axios';
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8001';
+
 const DocumentSummarizer = ({ onSummaryComplete }) => {
   const [file, setFile] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -31,13 +33,15 @@ const DocumentSummarizer = ({ onSummaryComplete }) => {
     formData.append('file', file);
 
     try {
-      const response = await axios.post('http://localhost:8000/summarize', formData, {
+      const response = await axios.post(`${API_BASE_URL}/summarize`, formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         }
       });
 
-      onSummaryComplete(response.data.summary);
+      if (typeof onSummaryComplete === 'function') {
+        onSummaryComplete(response.data.summary);
+      }
     } catch (error) {
       console.error('Error submitting file:', error);
       setError('An error occurred while summarizing the file. Please try again.');

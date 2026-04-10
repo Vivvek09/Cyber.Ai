@@ -4,10 +4,13 @@ import axios from 'axios';
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
-const DocumentSummarizer = ({ onSummaryComplete }) => {
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8001';
+
+const DocumentSummarizer = () => {
   const [file, setFile] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [summary, setSummary] = useState('');
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
@@ -31,13 +34,13 @@ const DocumentSummarizer = ({ onSummaryComplete }) => {
     formData.append('file', file);
 
     try {
-      const response = await axios.post('http://localhost:8000/summarize', formData, {
+      const response = await axios.post(`${API_BASE_URL}/summarize`, formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         }
       });
 
-      onSummaryComplete(response.data.summary);
+      setSummary(response.data.summary || '');
     } catch (error) {
       console.error('Error submitting file:', error);
       setError('An error occurred while summarizing the file. Please try again.');
@@ -73,6 +76,12 @@ const DocumentSummarizer = ({ onSummaryComplete }) => {
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
           Processing your file, please wait...
+        </div>
+      )}
+      {summary && (
+        <div className="mt-4 rounded-md border border-gray-200 p-4 bg-gray-50">
+          <h3 className="text-sm font-semibold mb-2">Summary</h3>
+          <p className="text-sm text-gray-700 whitespace-pre-wrap">{summary}</p>
         </div>
       )}
     </div>
